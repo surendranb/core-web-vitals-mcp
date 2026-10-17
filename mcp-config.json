@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "core-web-vitals-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "core-web-vitals-mcp",
+        "core-web-vitals-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

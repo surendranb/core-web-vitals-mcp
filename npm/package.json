@@ -1,0 +1,28 @@
+{
+  "name": "core-web-vitals-tools-mcp",
+  "version": "0.1.0",
+  "description": "FastMCP server for Core Web Vitals, Google CrUX field data, and PageSpeed Insights diagnostics (thin uvx bridge).",
+  "main": "bin/index.js",
+  "bin": {
+    "core-web-vitals-mcp": "bin/index.js",
+    "web-vitals-mcp": "bin/index.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/surendranb/core-web-vitals-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "core-web-vitals",
+    "web-vitals",
+    "crux",
+    "pagespeed",
+    "lighthouse",
+    "lcp",
+    "inp",
+    "cls",
+    "agents"
+  ],
+  "author": "Surendran B <reachsuren@gmail.com>"
+}

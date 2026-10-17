@@ -1,0 +1,37 @@
+{
+  "author": {
+    "name": "Surendran B",
+    "email": "reachsuren@gmail.com",
+    "url": "https://github.com/surendranb"
+  },
+  "name": "core-web-vitals-mcp",
+  "version": "0.1.0",
+  "description": "FastMCP server for Google Chrome UX Report (CrUX) and PageSpeed Insights: Core Web Vitals (LCP, INP, CLS), field history, and Lighthouse lab audits.",
+  "homepage": "https://github.com/surendranb/core-web-vitals-mcp",
+  "repository": "https://github.com/surendranb/core-web-vitals-mcp",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "core-web-vitals",
+    "web-vitals",
+    "crux",
+    "pagespeed",
+    "lighthouse",
+    "lcp",
+    "inp",
+    "cls",
+    "agents"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "core-web-vitals-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "core-web-vitals-mcp",
+        "core-web-vitals-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

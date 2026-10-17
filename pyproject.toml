@@ -1,0 +1,70 @@
+[project]
+name = "core-web-vitals-mcp"
+version = "0.1.0"
+description = "FastMCP server for Google Chrome UX Report (CrUX) and PageSpeed Insights: Core Web Vitals (LCP, INP, CLS), field history, and Lighthouse lab audits."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Surendran B", email = "reachsuren@gmail.com" }]
+keywords = [
+  "mcp",
+  "fastmcp",
+  "core-web-vitals",
+  "web-vitals",
+  "crux",
+  "pagespeed",
+  "lighthouse",
+  "lcp",
+  "inp",
+  "cls",
+  "seo",
+  "performance",
+  "agents",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP :: Site Management",
+]
+dependencies = [
+  "mcp>=2.0.0,<3",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+]
+publish = [
+  "build>=1.2.2",
+  "twine>=5.1.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/surendranb/core-web-vitals-mcp"
+Repository = "https://github.com/surendranb/core-web-vitals-mcp"
+Issues = "https://github.com/surendranb/core-web-vitals-mcp/issues"
+
+[project.scripts]
+core-web-vitals-mcp = "core_web_vitals_mcp.server:main"
+web-vitals-mcp = "core_web_vitals_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+core_web_vitals_mcp = ["skills/*.md", "py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
