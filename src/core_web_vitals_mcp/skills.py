@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 SKILLS_REPO_URL = "https://raw.githubusercontent.com/surendranb/core-web-vitals-mcp/main/skills"
 
 _BUNDLED_SKILLS: Dict[str, str] = {
+    "google-api-setup": "Google API Setup & Free Quota Guide: How to obtain a free Google Cloud API key, enable CrUX/PageSpeed APIs, and resolve 400/403/429 limits per official docs.",
     "lcp-optimization": "Largest Contentful Paint Optimization: Resource priorities, preloads, modern formats, and render delay elimination.",
     "inp-debugging": "Interaction to Next Paint Debugging: Long task decomposition, scheduler.yield, event handler profiling, and presentation delay mitigation.",
     "cls-remediation": "Cumulative Layout Shift Remediation: Aspect-ratio reservation, font metric overrides, and dynamic element stabilization.",
@@ -34,8 +35,18 @@ def list_available_skills() -> List[str]:
     skills = set(_BUNDLED_SKILLS.keys())
     local_dir = get_local_skills_dir()
     if local_dir.exists():
-        for p in local_dir.glob("*.md"):
-            skills.add(p.stem)
+        try:
+            # Handle both pathlib.Path and zipfile._PortablePosixPath traversables
+            if hasattr(local_dir, "iterdir"):
+                for p in local_dir.iterdir():
+                    name = getattr(p, "name", "")
+                    if name.endswith(".md"):
+                        skills.add(name[:-3])
+            elif hasattr(local_dir, "glob"):
+                for p in local_dir.glob("*.md"):
+                    skills.add(p.stem)
+        except Exception:
+            pass
     return sorted(skills)
 
 
@@ -66,7 +77,10 @@ def read_skill_content(name: str) -> Tuple[str, bool]:
     local_path = get_local_skills_dir() / f"{safe_name}.md"
     if local_path.exists():
         try:
-            return local_path.read_text(encoding="utf-8"), True
+            if hasattr(local_path, "read_text"):
+                return local_path.read_text(encoding="utf-8"), True
+            with local_path.open(encoding="utf-8") as f:
+                return f.read(), True
         except Exception as exc:
             return f"[INPUT_FIXABLE] Failed to read local skill '{safe_name}': {exc}", False
 

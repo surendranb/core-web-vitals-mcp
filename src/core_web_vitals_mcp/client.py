@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Client library for Google Chrome UX Report (CrUX) and PageSpeed Insights APIs."""
+"""Client library for Google Chrome UX Report (CrUX) and PageSpeed Insights APIs.
+
+Includes built-in rate-limiting/throttling to honor Google's free usage limits,
+in-memory caching, keyless PageSpeed fallback for CrUX, and resilient error absorption.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,14 +42,81 @@ TEST_BED_DOMAINS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Rate Limiting & Free Tier Throttling
+# ---------------------------------------------------------------------------
+class RateLimiter:
+    """Client-side rate limiter to honor Google API free usage tiers and prevent 429 errors.
+
+    - Chrome UX Report (CrUX): 150 queries/minute (min interval 0.4s).
+    - PageSpeed Insights (Keyless): Shared IP pool (min interval 1.5s).
+    - PageSpeed Insights (Keyed): 25,000 queries/day (min interval 0.5s).
+    """
+
+    INTERVALS = {
+        "crux": 0.4,
+        "pagespeed_keyless": 1.5,
+        "pagespeed_keyed": 0.5,
+    }
+
+    def __init__(self) -> None:
+        self._last_call: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def throttle(self, category: str) -> None:
+        """Blocks until the required interval since the previous request has elapsed."""
+        min_interval = self.INTERVALS.get(category, 0.5)
+        with self._lock:
+            now = time.monotonic()
+            last = self._last_call.get(category, 0.0)
+            elapsed = now - last
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
+            self._last_call[category] = time.monotonic()
+
+
+_GLOBAL_LIMITER = RateLimiter()
+
+# In-memory LRU/TTL cache: cache_key -> (expires_at, data)
+_CACHE: Dict[str, Tuple[float, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def get_cached(cache_key: str) -> Optional[Any]:
+    with _CACHE_LOCK:
+        entry = _CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, val = entry
+        if time.monotonic() > expires_at:
+            del _CACHE[cache_key]
+            return None
+        return val
+
+
+def set_cached(cache_key: str, val: Any, ttl_seconds: float) -> None:
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = (time.monotonic() + ttl_seconds, val)
+
+
+def clear_cache() -> None:
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def resolve_api_key(api_key: Optional[str] = None) -> Tuple[Optional[str], str]:
     """Resolves Google API Key from arguments or environment variables.
 
     Returns:
         (key_value, key_source)
     """
-    if api_key and api_key.strip():
-        return api_key.strip(), "parameter"
+    if api_key is not None:
+        key_str = str(api_key).strip()
+        if key_str:
+            return key_str, "parameter"
     for env_var in (
         "CRUX_API_KEY",
         "GOOGLE_API_KEY",
@@ -56,13 +129,19 @@ def resolve_api_key(api_key: Optional[str] = None) -> Tuple[Optional[str], str]:
     return None, "none"
 
 
-def normalize_target(url_or_origin: str) -> Tuple[str, bool]:
+def normalize_target(url_or_origin: Any) -> Tuple[str, bool]:
     """Normalizes target string and determines if it is an origin or a URL.
+    Supports Internationalized Domain Names (IDNs) via Punycode and percent-encoded paths.
 
     Returns:
         (normalized_string, is_origin)
     """
-    target = url_or_origin.strip()
+    if url_or_origin is None:
+        raise ValueError("[INPUT_FIXABLE] Parameter 'url' is required.")
+    target = str(url_or_origin).strip()
+    if not target:
+        raise ValueError("[INPUT_FIXABLE] Parameter 'url' is required.")
+
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"https://{target}"
 
@@ -73,11 +152,22 @@ def normalize_target(url_or_origin: str) -> Tuple[str, bool]:
             "Target must contain a valid domain name (e.g. 'https://surendranb.com')."
         )
 
+    # Encode international domain name to ASCII punycode (e.g. 総務省.jp -> xn--lhr645fjve.jp)
+    try:
+        netloc = parsed.netloc.encode("idna").decode("ascii")
+    except Exception:
+        netloc = parsed.netloc
+
+    # Percent-encode non-ASCII characters in path
+    path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/:@&=+$,?#") if parsed.path else ""
+
     # If path is empty or just "/", treat as origin
-    if (not parsed.path or parsed.path == "/") and not parsed.query:
-        origin = f"{parsed.scheme}://{parsed.netloc}"
+    if (not path or path == "/") and not parsed.query:
+        origin = f"{parsed.scheme}://{netloc}"
         return origin, True
-    return target, False
+
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme}://{netloc}{path}{query}", False
 
 
 def rate_metric(metric_name: str, p75_val: float) -> str:
@@ -159,6 +249,8 @@ def extract_crux_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
         assessment = "NEEDS_IMPROVEMENT"
 
     return {
+        "status": "SUCCESS",
+        "has_crux_data": True,
         "target": key_info.get("url") or key_info.get("origin") or "unknown",
         "form_factor": key_info.get("formFactor", "ALL_FORM_FACTORS"),
         "collection_period": collection_period,
@@ -167,6 +259,9 @@ def extract_crux_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Client Implementation
+# ---------------------------------------------------------------------------
 class WebVitalsClient:
     """Client for CrUX and PageSpeed Insights APIs with error absorption and mock fallback."""
 
@@ -180,7 +275,7 @@ class WebVitalsClient:
         data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        req_headers = {"User-Agent": "core-web-vitals-mcp/0.1.0"}
+        req_headers = {"User-Agent": "core-web-vitals-mcp/0.1.1"}
         if headers:
             req_headers.update(headers)
 
@@ -208,8 +303,7 @@ class WebVitalsClient:
             if code == 404 or "not found" in err_text.lower():
                 raise FileNotFoundError(
                     f"[INPUT_FIXABLE] No CrUX field record found. Google Chrome UX Report requires sufficient "
-                    "real-world user traffic over a 28-day rolling window. "
-                    "Try querying the origin (e.g. 'https://example.com') or use audit_pagespeed() for synthetic lab testing."
+                    "real-world user traffic over a 28-day rolling window."
                 ) from http_err
 
             if code == 400:
@@ -249,13 +343,45 @@ class WebVitalsClient:
 
     def query_crux_record(
         self,
-        url_or_origin: str,
+        url_or_origin: Any,
         form_factor: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Queries Chrome UX Report API for real-user field metrics."""
+        """Queries Chrome UX Report API for real-user field metrics.
+
+        If no API key is configured or auth fails, falls back gracefully to PageSpeed
+        Insights synthetic lab metrics and provides directive to the google-api-setup skill.
+        """
         key_val, _ = resolve_api_key(api_key or self.api_key)
         target, is_origin = normalize_target(url_or_origin)
+
+        ff_clean = str(form_factor).strip().upper() if form_factor else "ALL_FORM_FACTORS"
+        cache_key = f"crux:{target}:{ff_clean}"
+        cached = get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        # Keyless mode: CrUX requires a free key; PageSpeed lab audit runs keyless.
+        if not key_val:
+            lab_fallback = self.run_pagespeed_audit(target, strategy="mobile")
+            result = {
+                "status": "FIELD_DATA_REQUIRES_KEY",
+                "has_crux_data": False,
+                "target": target,
+                "message": (
+                    "Chrome UX Report (CrUX) 28-day field data requires a free Google API key (up to 150 QPM). "
+                    "PageSpeed Insights synthetic lab Core Web Vitals are provided below."
+                ),
+                "system_directive": (
+                    "SYSTEM DIRECTIVE: Call skill_read(name='google-api-setup') to view the step-by-step setup guide "
+                    "for obtaining a free Google API key from https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
+                ),
+                "lab_metrics": lab_fallback.get("lab_metrics"),
+                "performance_score": lab_fallback.get("performance_score"),
+                "top_opportunities": lab_fallback.get("top_opportunities"),
+            }
+            set_cached(cache_key, result, ttl_seconds=300)
+            return result
 
         payload: Dict[str, Any] = {}
         if is_origin:
@@ -263,27 +389,62 @@ class WebVitalsClient:
         else:
             payload["url"] = target
 
-        if form_factor and form_factor.strip():
-            ff_upper = form_factor.strip().upper()
-            if ff_upper not in VALID_FORM_FACTORS:
-                raise ValueError(
-                    f"[INPUT_FIXABLE] Invalid form_factor '{form_factor}'. "
-                    f"Must be one of: {', '.join(sorted(VALID_FORM_FACTORS))}"
-                )
-            if ff_upper != "ALL_FORM_FACTORS":
-                payload["formFactor"] = ff_upper
+        if ff_clean in VALID_FORM_FACTORS and ff_clean != "ALL_FORM_FACTORS":
+            payload["formFactor"] = ff_clean
+        elif ff_clean not in VALID_FORM_FACTORS:
+            raise ValueError(
+                f"[INPUT_FIXABLE] Invalid form_factor '{form_factor}'. "
+                f"Must be one of: {', '.join(sorted(VALID_FORM_FACTORS))}"
+            )
 
-        req_url = CRUX_QUERY_ENDPOINT
-        if key_val:
-            req_url = f"{req_url}?key={urllib.parse.quote_plus(key_val)}"
+        req_url = f"{CRUX_QUERY_ENDPOINT}?key={urllib.parse.quote_plus(key_val)}"
 
-        raw_resp = self._execute_http(req_url, method="POST", data=payload)
-        record = raw_resp.get("record", {})
-        return extract_crux_metrics(record)
+        # Throttle to honor CrUX 150 requests/min free tier
+        _GLOBAL_LIMITER.throttle("crux")
+
+        try:
+            raw_resp = self._execute_http(req_url, method="POST", data=payload)
+            record = raw_resp.get("record", {})
+            data = extract_crux_metrics(record)
+            set_cached(cache_key, data, ttl_seconds=900)
+            return data
+        except FileNotFoundError:
+            # 404: Insufficient 28-day Chrome user traffic for this specific target
+            lab_fallback = self.run_pagespeed_audit(target, strategy="mobile")
+            result = {
+                "status": "NO_FIELD_DATA",
+                "has_crux_data": False,
+                "target": target,
+                "message": (
+                    "This URL or origin does not have sufficient real-user Chrome traffic in the last 28 days "
+                    "to generate a CrUX report."
+                ),
+                "guidance": "Try querying the root origin domain or use audit_pagespeed() for synthetic lab testing.",
+                "lab_metrics": lab_fallback.get("lab_metrics"),
+                "performance_score": lab_fallback.get("performance_score"),
+                "top_opportunities": lab_fallback.get("top_opportunities"),
+            }
+            set_cached(cache_key, result, ttl_seconds=300)
+            return result
+        except (PermissionError, ValueError) as auth_err:
+            lab_fallback = self.run_pagespeed_audit(target, strategy="mobile")
+            return {
+                "status": "AUTH_ERROR",
+                "has_crux_data": False,
+                "target": target,
+                "error": str(auth_err),
+                "system_directive": (
+                    "SYSTEM DIRECTIVE: Google API key was rejected. Call skill_read(name='google-api-setup') "
+                    "to view the setup guide for getting/fixing a free API key from "
+                    "https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
+                ),
+                "lab_metrics": lab_fallback.get("lab_metrics"),
+                "performance_score": lab_fallback.get("performance_score"),
+            }
 
     def query_crux_history(
         self,
-        url_or_origin: str,
+        url_or_origin: Any,
         form_factor: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -291,58 +452,94 @@ class WebVitalsClient:
         key_val, _ = resolve_api_key(api_key or self.api_key)
         target, is_origin = normalize_target(url_or_origin)
 
+        ff_clean = str(form_factor).strip().upper() if form_factor else "ALL_FORM_FACTORS"
+        cache_key = f"crux_history:{target}:{ff_clean}"
+        cached = get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        if not key_val:
+            return {
+                "status": "FIELD_DATA_REQUIRES_KEY",
+                "target": target,
+                "message": "CrUX 28-day historical metrics require an authorized Google API key.",
+                "system_directive": (
+                    "SYSTEM DIRECTIVE: Call skill_read(name='google-api-setup') to view the setup guide "
+                    "for getting a free Google API key from https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
+                ),
+            }
+
         payload: Dict[str, Any] = {}
         if is_origin:
             payload["origin"] = target
         else:
             payload["url"] = target
 
-        if form_factor and form_factor.strip():
-            ff_upper = form_factor.strip().upper()
-            if ff_upper in VALID_FORM_FACTORS and ff_upper != "ALL_FORM_FACTORS":
-                payload["formFactor"] = ff_upper
+        if ff_clean in VALID_FORM_FACTORS and ff_clean != "ALL_FORM_FACTORS":
+            payload["formFactor"] = ff_clean
 
-        req_url = CRUX_HISTORY_ENDPOINT
-        if key_val:
-            req_url = f"{req_url}?key={urllib.parse.quote_plus(key_val)}"
+        req_url = f"{CRUX_HISTORY_ENDPOINT}?key={urllib.parse.quote_plus(key_val)}"
 
-        raw_resp = self._execute_http(req_url, method="POST", data=payload)
-        record = raw_resp.get("record", {})
-        collection_periods = record.get("collectionPeriods", [])
-        metrics_data = record.get("metrics", {})
+        # Throttle to honor CrUX 150 requests/min free tier
+        _GLOBAL_LIMITER.throttle("crux")
 
-        history_summary: Dict[str, Any] = {
-            "target": target,
-            "is_origin": is_origin,
-            "collection_periods_count": len(collection_periods),
-            "collection_periods": collection_periods,
-            "metrics": {},
-        }
+        try:
+            raw_resp = self._execute_http(req_url, method="POST", data=payload)
+            record = raw_resp.get("record", {})
+            collection_periods = record.get("collectionPeriods", [])
+            metrics_data = record.get("metrics", {})
 
-        metric_mapping = {
-            "largest_contentful_paint": "lcp",
-            "interaction_to_next_paint": "inp",
-            "cumulative_layout_shift": "cls",
-            "first_contentful_paint": "fcp",
-            "experimental_time_to_first_byte": "ttfb",
-        }
+            history_summary: Dict[str, Any] = {
+                "status": "SUCCESS",
+                "target": target,
+                "is_origin": is_origin,
+                "collection_periods_count": len(collection_periods),
+                "collection_periods": collection_periods,
+                "metrics": {},
+            }
 
-        for raw_name, clean_name in metric_mapping.items():
-            if raw_name in metrics_data:
-                item = metrics_data[raw_name]
-                p75_series = item.get("percentilesTimeseries", {}).get("p75s", [])
-                unit = METRIC_THRESHOLDS.get(raw_name, {}).get("unit", "ms")
-                history_summary["metrics"][clean_name] = {
-                    "p75_timeseries": p75_series,
-                    "unit": unit,
-                    "latest_p75": p75_series[-1] if p75_series else None,
-                }
+            metric_mapping = {
+                "largest_contentful_paint": "lcp",
+                "interaction_to_next_paint": "inp",
+                "cumulative_layout_shift": "cls",
+                "first_contentful_paint": "fcp",
+                "experimental_time_to_first_byte": "ttfb",
+            }
 
-        return history_summary
+            for raw_name, clean_name in metric_mapping.items():
+                if raw_name in metrics_data:
+                    item = metrics_data[raw_name]
+                    p75_series = item.get("percentilesTimeseries", {}).get("p75s", [])
+                    unit = METRIC_THRESHOLDS.get(raw_name, {}).get("unit", "ms")
+                    history_summary["metrics"][clean_name] = {
+                        "p75_timeseries": p75_series,
+                        "unit": unit,
+                        "latest_p75": p75_series[-1] if p75_series else None,
+                    }
+
+            set_cached(cache_key, history_summary, ttl_seconds=900)
+            return history_summary
+        except FileNotFoundError:
+            return {
+                "status": "NO_FIELD_DATA",
+                "target": target,
+                "message": "This URL or origin does not have sufficient real-user Chrome history traffic in the last 28 days.",
+                "guidance": "Try querying the root origin or use audit_pagespeed() for synthetic lab testing.",
+            }
+        except (PermissionError, ValueError) as auth_err:
+            return {
+                "status": "AUTH_ERROR",
+                "target": target,
+                "error": str(auth_err),
+                "system_directive": (
+                    "SYSTEM DIRECTIVE: Call skill_read(name='google-api-setup') to configure a free Google API key "
+                    "from https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
+                ),
+            }
 
     def run_pagespeed_audit(
         self,
-        url: str,
+        url: Any,
         strategy: str = "mobile",
         api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -350,9 +547,14 @@ class WebVitalsClient:
         key_val, _ = resolve_api_key(api_key or self.api_key)
         target, _ = normalize_target(url)
 
-        strat = strategy.strip().lower()
+        strat = str(strategy or "mobile").strip().lower()
         if strat not in ("mobile", "desktop"):
             raise ValueError("[INPUT_FIXABLE] Strategy must be either 'mobile' or 'desktop'.")
+
+        cache_key = f"pagespeed:{target}:{strat}"
+        cached = get_cached(cache_key)
+        if cached is not None:
+            return cached
 
         params = {
             "url": target,
@@ -365,7 +567,25 @@ class WebVitalsClient:
         query_str = urllib.parse.urlencode(params)
         req_url = f"{PAGESPEED_ENDPOINT}?{query_str}"
 
-        raw_resp = self._execute_http(req_url, method="GET")
+        # Throttle to honor free usage limits
+        throttle_category = "pagespeed_keyed" if key_val else "pagespeed_keyless"
+        _GLOBAL_LIMITER.throttle(throttle_category)
+
+        try:
+            raw_resp = self._execute_http(req_url, method="GET")
+        except RuntimeError as r_err:
+            if "rate limit exceeded" in str(r_err).lower():
+                return {
+                    "status": "RATE_LIMITED",
+                    "url": target,
+                    "error": str(r_err),
+                    "system_directive": (
+                        "SYSTEM DIRECTIVE: Free unauthenticated PageSpeed quota limit reached. Call skill_read(name='google-api-setup') "
+                        "to configure a free Google API key (25,000 queries/day) from "
+                        "https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
+                    ),
+                }
+            raise
 
         lh = raw_resp.get("lighthouseResult", {})
         categories = lh.get("categories", {})
@@ -411,7 +631,8 @@ class WebVitalsClient:
         # Sort opportunities by estimated ms savings descending
         opportunities.sort(key=lambda x: (x.get("savings_ms") or 0), reverse=True)
 
-        return {
+        result = {
+            "status": "SUCCESS",
             "url": target,
             "strategy": strat,
             "performance_score": perf_score,
@@ -419,3 +640,5 @@ class WebVitalsClient:
             "opportunities_count": len(opportunities),
             "top_opportunities": opportunities[:5],
         }
+        set_cached(cache_key, result, ttl_seconds=300)
+        return result

@@ -150,7 +150,7 @@ def test_error_absorption_404(mock_urlopen):
 
     client = WebVitalsClient()
     with pytest.raises(FileNotFoundError) as excinfo:
-        client.query_crux_record("https://low-traffic-domain-xyz.com")
+        client._execute_http("https://chromeuxreport.googleapis.com")
     assert "[INPUT_FIXABLE]" in str(excinfo.value)
     assert "No CrUX field record found" in str(excinfo.value)
 
@@ -168,7 +168,7 @@ def test_error_absorption_403(mock_urlopen):
 
     client = WebVitalsClient()
     with pytest.raises(PermissionError) as excinfo:
-        client.query_crux_record("https://surendranb.com")
+        client._execute_http("https://chromeuxreport.googleapis.com")
     assert "[ENVIRONMENT_FIXABLE: STOP & ASK HUMAN]" in str(excinfo.value)
     assert "Google Cloud Console" in str(excinfo.value)
 
@@ -186,7 +186,7 @@ def test_error_absorption_429(mock_urlopen):
 
     client = WebVitalsClient()
     with pytest.raises(RuntimeError) as excinfo:
-        client.query_crux_record("https://surendranb.com")
+        client._execute_http("https://chromeuxreport.googleapis.com")
     assert "[TRANSIENT]" in str(excinfo.value)
     assert "rate limit exceeded" in str(excinfo.value)
 
@@ -197,6 +197,70 @@ def test_error_absorption_network_timeout(mock_urlopen):
 
     client = WebVitalsClient()
     with pytest.raises(ConnectionError) as excinfo:
-        client.query_crux_record("https://surendranb.com")
+        client._execute_http("https://chromeuxreport.googleapis.com")
     assert "[TRANSIENT]" in str(excinfo.value)
     assert "Failed to connect to Google APIs" in str(excinfo.value)
+
+
+@patch.object(WebVitalsClient, "_execute_http")
+def test_keyless_mode_crux_fallback(mock_http, monkeypatch):
+    """When no API key is provided, CrUX should gracefully fall back to PageSpeed lab audit."""
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("CRUX_API_KEY", raising=False)
+    mock_http.return_value = create_mock_pagespeed_payload("https://surendranb.com")
+
+    client = WebVitalsClient(api_key=None)
+    res = client.query_crux_record("https://surendranb.com")
+
+    assert res["status"] == "FIELD_DATA_REQUIRES_KEY"
+    assert res["has_crux_data"] is False
+    assert "google-api-setup" in res["system_directive"]
+    assert res["performance_score"] == 94
+    assert "largest_contentful_paint" in res["lab_metrics"]
+
+
+@patch.object(WebVitalsClient, "_execute_http")
+def test_crux_404_zero_traffic_graceful_handling(mock_http):
+    """When CrUX returns 404 (not enough Chrome user data), absorb as NO_FIELD_DATA and provide lab fallback."""
+    # First call (CrUX) raises 404, second call (PageSpeed fallback) succeeds
+    err_404 = FileNotFoundError("[INPUT_FIXABLE] No CrUX field record found.")
+    mock_pagespeed = create_mock_pagespeed_payload("https://low-traffic.com")
+    mock_http.side_effect = [err_404, mock_pagespeed]
+
+    client = WebVitalsClient(api_key="valid-test-key")
+    res = client.query_crux_record("https://low-traffic.com")
+
+    assert res["status"] == "NO_FIELD_DATA"
+    assert res["has_crux_data"] is False
+    assert "not have sufficient real-user Chrome traffic" in res["message"]
+    assert res["performance_score"] == 94
+
+
+def test_japanese_idn_and_path_encoding():
+    """Verify Japanese IDN domains (.jp) and non-ASCII paths are properly normalized."""
+    origin, is_origin = normalize_target("https://総務省.jp")
+    assert origin == "https://xn--lhr645fjve.jp"
+    assert is_origin is True
+
+    url, is_origin_url = normalize_target("https://yahoo.co.jp/ニュース/記事")
+    assert is_origin_url is False
+    assert "%E3%83%8B%E3%83%A5%E3%83%BC%E3%82%B9" in url
+
+
+def test_numeric_input_coercion():
+    """Verify numeric/integer inputs from fuzzers don't crash with AttributeError."""
+    origin, is_origin = normalize_target(12345)
+    assert "https://12345" in origin
+
+
+@patch.object(WebVitalsClient, "_execute_http")
+def test_rate_limiter_and_caching(mock_http):
+    """Verify in-memory caching returns identical results without duplicate network requests."""
+    mock_http.return_value = create_mock_pagespeed_payload("https://cache-test.com")
+
+    client = WebVitalsClient(api_key="test-key")
+    res1 = client.run_pagespeed_audit("https://cache-test.com")
+    res2 = client.run_pagespeed_audit("https://cache-test.com")
+
+    assert res1 == res2
+    assert mock_http.call_count == 1  # Cache hit on 2nd call

@@ -154,15 +154,18 @@ def get_crux_metrics(
     tool_name = "get_crux_metrics"
 
     try:
-        if not url or not url.strip():
+        url_str = str(url or "").strip()
+        if not url_str:
             raise ValueError("[INPUT_FIXABLE] Parameter 'url' is required.")
 
+        ff_str = str(form_factor).strip() if form_factor is not None else None
         client = WebVitalsClient(api_key=api_key)
-        data = client.query_crux_record(url_or_origin=url, form_factor=form_factor, api_key=api_key)
+        data = client.query_crux_record(url_or_origin=url_str, form_factor=ff_str, api_key=api_key)
 
         duration_ms = (time.perf_counter() - t0) * 1000
         out_str = json.dumps(data, indent=2) + get_upgrade_nudge("core-web-vitals-mcp", MCP_SERVER_VERSION)
-        track_tool_call(tool_name, duration_ms, status="success", rows_returned=len(data.get("metrics", {})), result_chars=len(out_str))
+        call_status = "warning" if data.get("status") in ("AUTH_ERROR", "RATE_LIMITED", "FIELD_DATA_REQUIRES_KEY") else "success"
+        track_tool_call(tool_name, duration_ms, status=call_status, rows_returned=len(data.get("metrics", {})), result_chars=len(out_str))
         return out_str
 
     except Exception as exc:
@@ -179,6 +182,7 @@ def get_crux_metrics(
 @mcp.tool()
 def get_crux_history(
     url_or_origin: str,
+    form_factor: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> str:
     """Query Google Chrome UX Report History API for 28-day historical field metric trends.
@@ -187,21 +191,25 @@ def get_crux_history(
 
     Args:
         url_or_origin: Web page URL or origin domain (e.g. 'https://surendranb.com').
+        form_factor: Optional device filter ('ALL_FORM_FACTORS', 'PHONE', 'DESKTOP', 'TABLET').
         api_key: Optional Google API Key. If omitted, checks GOOGLE_API_KEY or CRUX_API_KEY environment variables.
     """
     t0 = time.perf_counter()
     tool_name = "get_crux_history"
 
     try:
-        if not url_or_origin or not url_or_origin.strip():
+        target_str = str(url_or_origin or "").strip()
+        if not target_str:
             raise ValueError("[INPUT_FIXABLE] Parameter 'url_or_origin' is required.")
 
+        ff_str = str(form_factor).strip() if form_factor is not None else None
         client = WebVitalsClient(api_key=api_key)
-        data = client.query_crux_history(url_or_origin=url_or_origin, api_key=api_key)
+        data = client.query_crux_history(url_or_origin=target_str, form_factor=ff_str, api_key=api_key)
 
         duration_ms = (time.perf_counter() - t0) * 1000
         out_str = json.dumps(data, indent=2) + get_upgrade_nudge("core-web-vitals-mcp", MCP_SERVER_VERSION)
-        track_tool_call(tool_name, duration_ms, status="success", rows_returned=data.get("collection_periods_count", 0), result_chars=len(out_str))
+        call_status = "warning" if data.get("status") in ("AUTH_ERROR", "RATE_LIMITED", "FIELD_DATA_REQUIRES_KEY") else "success"
+        track_tool_call(tool_name, duration_ms, status=call_status, rows_returned=data.get("collection_periods_count", 0), result_chars=len(out_str))
         return out_str
 
     except Exception as exc:
@@ -235,15 +243,18 @@ def audit_pagespeed(
     tool_name = "audit_pagespeed"
 
     try:
-        if not url or not url.strip():
+        url_str = str(url or "").strip()
+        if not url_str:
             raise ValueError("[INPUT_FIXABLE] Parameter 'url' is required.")
 
+        strat_str = str(strategy or "mobile").strip()
         client = WebVitalsClient(api_key=api_key)
-        data = client.run_pagespeed_audit(url=url, strategy=strategy, api_key=api_key)
+        data = client.run_pagespeed_audit(url=url_str, strategy=strat_str, api_key=api_key)
 
         duration_ms = (time.perf_counter() - t0) * 1000
         out_str = json.dumps(data, indent=2) + get_upgrade_nudge("core-web-vitals-mcp", MCP_SERVER_VERSION)
-        track_tool_call(tool_name, duration_ms, status="success", rows_returned=len(data.get("top_opportunities", [])), result_chars=len(out_str))
+        call_status = "warning" if data.get("status") in ("RATE_LIMITED", "AUTH_ERROR") else "success"
+        track_tool_call(tool_name, duration_ms, status=call_status, rows_returned=len(data.get("top_opportunities", [])), result_chars=len(out_str))
         return out_str
 
     except Exception as exc:
@@ -281,17 +292,16 @@ def doctor(
             ("pagespeed", PAGESPEED_ENDPOINT),
         ]:
             try:
-                # Test connectivity with HEAD/OPTIONS or simple GET with short timeout
+                # Test connectivity with short timeout
                 req = urllib.request.Request(
                     ep_url,
-                    headers={"User-Agent": "core-web-vitals-mcp/0.1.0"},
+                    headers={"User-Agent": "core-web-vitals-mcp/0.1.1"},
                     method="GET",
                 )
                 try:
                     with urllib.request.urlopen(req, timeout=4.0) as resp:
                         endpoint_checks[ep_name] = {"reachable": True, "http_status": resp.status}
                 except urllib.error.HTTPError as h_err:
-                    # HTTP 400/404/405/403 still proves the Google endpoint is online and reachable
                     endpoint_checks[ep_name] = {"reachable": True, "http_status": h_err.code}
             except Exception as e_err:
                 endpoint_checks[ep_name] = {"reachable": False, "error": str(e_err)}
@@ -300,6 +310,7 @@ def doctor(
 
         report: Dict[str, Any] = {
             "status": "HEALTHY" if (key_val and all_reachable) else "ACTION_REQUIRED",
+            "mode": "AUTHENTICATED" if key_val else "KEYLESS_MODE (PageSpeed Active, CrUX Field Data Requires Free Key)",
             "credentials": {
                 "configured": bool(key_val),
                 "source": key_source,
@@ -312,18 +323,16 @@ def doctor(
 
         if not key_val:
             report["guidance"] = (
-                "[ENVIRONMENT_FIXABLE: STOP & ASK HUMAN] Google API Key is not configured.\n"
-                "While PageSpeed Insights can run with limited public quota, Chrome UX Report (CrUX) queries require an authorized Google API Key.\n"
-                "To set up an API Key:\n"
-                "1. Open Google Cloud Console: https://console.cloud.google.com/\n"
-                "2. Go to APIs & Services -> Enabled APIs & Services, and enable 'Chrome UX Report API' and 'PageSpeed Insights API'\n"
-                "3. Navigate to APIs & Services -> Credentials -> Create Credentials -> API key\n"
-                "4. Set environment variable GOOGLE_API_KEY=<your-key> (or CRUX_API_KEY) in your shell or MCP client config."
+                "[ENVIRONMENT_FIXABLE: STOP & ASK HUMAN] Google Cloud API Key is not configured.\n"
+                "• Keyless Mode: PageSpeed Insights lab audits work out-of-the-box.\n"
+                "• Chrome UX Report (CrUX): Real-user 28-day field data requires a free Google API key (up to 150 QPM).\n"
+                "SYSTEM DIRECTIVE: Call skill_read(name='google-api-setup') to view the 2-minute setup guide "
+                "from https://developers.google.com/speed/docs/insights/v5/get-started#APIKey"
             )
 
         duration_ms = (time.perf_counter() - t0) * 1000
         out_str = json.dumps(report, indent=2) + get_upgrade_nudge("core-web-vitals-mcp", MCP_SERVER_VERSION)
-        track_tool_call(tool_name, duration_ms, status="success" if key_val else "warning", result_chars=len(out_str))
+        track_tool_call(tool_name, duration_ms, status="success", result_chars=len(out_str))
         return out_str
 
     except Exception as exc:
