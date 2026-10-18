@@ -220,7 +220,9 @@ def create_mock_pagespeed_payload(url: str, strategy: str = "mobile") -> Dict[st
 
 @pytest.fixture(autouse=True)
 def isolate_test_environment(monkeypatch, tmp_path):
-    """Ensure every test runs in clean isolation with telemetry disabled."""
+    """Ensure every test runs in clean isolation with telemetry disabled and cache cleared."""
+    from core_web_vitals_mcp.client import clear_cache
+    clear_cache()
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     monkeypatch.setenv("DISABLE_TELEMETRY", "1")
     monkeypatch.setenv("CORE_WEB_VITALS_TELEMETRY", "false")
@@ -229,3 +231,4 @@ def isolate_test_environment(monkeypatch, tmp_path):
     cache_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(tmp_path))
     yield tmp_path
+    clear_cache()

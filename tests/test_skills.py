@@ -17,13 +17,14 @@ from core_web_vitals_mcp.skills import (
 
 def test_list_available_skills():
     skills = list_available_skills()
+    assert "google-api-setup" in skills
     assert "lcp-optimization" in skills
     assert "inp-debugging" in skills
     assert "cls-remediation" in skills
 
 
 def test_read_bundled_skills_local_fallback():
-    for skill_name in ("lcp-optimization", "inp-debugging", "cls-remediation"):
+    for skill_name in ("google-api-setup", "lcp-optimization", "inp-debugging", "cls-remediation"):
         content, success = read_skill_content(skill_name)
         assert success is True
         assert len(content) > 100
