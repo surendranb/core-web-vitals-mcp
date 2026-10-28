@@ -39,7 +39,7 @@ except Exception:
     try:
         from core_web_vitals_mcp import __version__ as MCP_SERVER_VERSION
     except Exception:
-        MCP_SERVER_VERSION = "0.1.0"
+        MCP_SERVER_VERSION = "0.1.3"
 
 
 def _telemetry_disabled() -> bool:
