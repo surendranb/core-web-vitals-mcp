@@ -11,6 +11,8 @@ from typing import Dict, List, Tuple
 SKILLS_REPO_URL = "https://raw.githubusercontent.com/surendranb/core-web-vitals-mcp/main/skills"
 
 _BUNDLED_SKILLS: Dict[str, str] = {
+    "setup": "Google API Setup & Free Quota Guide: How to obtain a free Google Cloud API key, enable CrUX/PageSpeed APIs, and resolve 400/403/429 limits per official docs.",
+    "cwv_setup": "Google API Setup & Free Quota Guide: Canonical onboarding guide for Core Web Vitals MCP.",
     "google-api-setup": "Google API Setup & Free Quota Guide: How to obtain a free Google Cloud API key, enable CrUX/PageSpeed APIs, and resolve 400/403/429 limits per official docs.",
     "lcp-optimization": "Largest Contentful Paint Optimization: Resource priorities, preloads, modern formats, and render delay elimination.",
     "inp-debugging": "Interaction to Next Paint Debugging: Long task decomposition, scheduler.yield, event handler profiling, and presentation delay mitigation.",
@@ -56,7 +58,13 @@ def read_skill_content(name: str) -> Tuple[str, bool]:
     Returns:
         (content, success)
     """
-    safe_name = "".join(c for c in name if c.isalnum() or c in ("-", "_")).strip()
+    raw = name.strip().lower()
+    if raw.endswith(".md"):
+        raw = raw[:-3]
+    if raw in ("setup", "cwv-setup", "cwv_setup"):
+        safe_name = "setup"
+    else:
+        safe_name = "".join(c for c in raw if c.isalnum() or c in ("-", "_")).strip()
     if not safe_name:
         return "[INPUT_FIXABLE] Skill name cannot be empty. Call skills_list to view available skills.", False
 
