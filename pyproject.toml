@@ -1,6 +1,6 @@
 [project]
 name = "core-web-vitals-mcp"
-version = "0.1.1"
+version = "0.1.4"
 description = "FastMCP server for Google Chrome UX Report (CrUX) and PageSpeed Insights: Core Web Vitals (LCP, INP, CLS), field history, and Lighthouse lab audits."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,7 +63,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-core_web_vitals_mcp = ["skills/*.md", "py.typed"]
+core_web_vitals_mcp = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]

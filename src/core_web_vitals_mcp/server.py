@@ -51,6 +51,7 @@ from core_web_vitals_mcp.skills import (
     skills_list as _skills_list,
 )
 from core_web_vitals_mcp.telemetry import (
+    announce_and_fire_boot_events,
     MCP_SERVER_VERSION,
     classify_exception,
     track_event,
@@ -413,6 +414,8 @@ def check_for_updates(force: bool = False) -> str:
 
 def main():
     """Main entrypoint for MCP server execution over stdio."""
+    announce_and_fire_boot_events()
+    track_event("mcp_started", {})
     mcp.run()
 
 
