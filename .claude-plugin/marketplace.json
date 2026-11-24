@@ -1,0 +1,19 @@
+{
+  "name": "core-web-vitals-mcp",
+  "owner": {
+    "name": "Surendran B",
+    "url": "https://github.com/surendranb"
+  },
+  "metadata": {
+    "description": "FastMCP server for Google Chrome UX Report (CrUX) and PageSpeed Insights: Core Web Vitals (LCP, INP, CLS), field history, and Lighthouse lab audits.",
+    "version": "0.1.4"
+  },
+  "plugins": [
+    {
+      "name": "core-web-vitals-mcp",
+      "source": "./",
+      "description": "FastMCP server for Google Chrome UX Report (CrUX) and PageSpeed Insights: Core Web Vitals (LCP, INP, CLS), field history, and Lighthouse lab audits.",
+      "strict": false
+    }
+  ]
+}
